@@ -13,6 +13,8 @@ import {Challenge, PasskeyUserPost} from '../../types/PasskeyTypes';
 import challengeModel from '../models/challengeModel';
 import passkeyUserModel from '../models/passkeyUserModel';
 import {RegistrationResponseJSON} from '@simplewebauthn/server/script/deps';
+import authenticatorDeviceModel from '../models/authenticatorDeviceModel';
+import {Types} from 'mongoose';
 
 // check environment variables
 if (
@@ -118,7 +120,6 @@ const verifyPasskey = async (
       return;
     }
 
-    // TODO: Verify registration response
     const opts: VerifyRegistrationResponseOpts = {
       response: req.body.registrationOptions,
       expectedChallenge: expectedChallenge.challenge,
@@ -136,11 +137,41 @@ const verifyPasskey = async (
       next(new CustomError('Verification failed', 403));
       return;
     }
-    // TODO: Check if device is already registered
-    // TODO: Save new authenticator to AuthenticatorDevice collection
-    // TODO: Update user devices array in DB
-    // TODO: Clear challenge from DB after successful registration
-    // TODO: Retrieve and send user details from AUTH API
+
+    const {credentialPublicKey, credentialID, counter} = registrationInfo;
+    const existingDevice = await authenticatorDeviceModel.findOne({
+      credentialID,
+    });
+
+    if (existingDevice) {
+      next(new CustomError('Device already registered', 400));
+      return;
+    }
+
+    const newDevice = new authenticatorDeviceModel({
+      email: req.body.email,
+      credentialPublicKey: Buffer.from(credentialPublicKey),
+      credentialID,
+      counter,
+      transports: req.body.registrationOptions.response.transports,
+    });
+
+    const newDeviceResult = await newDevice.save();
+
+    const user = await passkeyUserModel.findOne({email: req.body.email});
+    if (!user) {
+      next(new CustomError('User not found', 404));
+      return;
+    }
+    // dokumentin taulukon päivittäminen
+    user.devices.push(newDeviceResult._id as Types.ObjectId);
+    await user.save();
+
+    await challengeModel.findOneAndDelete({email: req.body.email});
+    const userResponse = await fetchData<UserResponse>(
+      AUTH_URL + '/api/v1/users/' + user.userId,
+    );
+    res.json(userResponse);
   } catch (error) {
     next(new CustomError((error as Error).message, 500));
   }
